@@ -1,5 +1,5 @@
 // Trader Insight Micro-App
-window['trader-insightApp'] = {
+window['traderInsightApp'] = {
     pairs: [],
     analysis: null,
 

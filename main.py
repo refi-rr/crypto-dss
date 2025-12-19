@@ -1,8 +1,8 @@
-from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
-from typing import Optional, List, Dict
+from typing import Optional, List
 from datetime import datetime, timedelta
 import jwt
 import bcrypt
@@ -12,12 +12,9 @@ import pandas as pd
 import numpy as np
 from contextlib import contextmanager
 import time
-import secrets
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from fastapi import BackgroundTasks
 
-app = FastAPI(title="Crypto Trading DSS API", version="2.0.0")
+app = FastAPI(title="Crypto Trading DSS API", version="1.0.0")
 
 # CORS Configuration
 app.add_middleware(
@@ -41,6 +38,30 @@ EMAIL_CONFIG = {
     "sender_name": "CryptoDSS"
 }
 
+# API Configuration with fallbacks
+API_CONFIGS = [
+    {
+        "name": "Binance Futures",
+        "base_url": "https://fapi.binance.com",
+        "pairs_endpoint": "/fapi/v1/exchangeInfo",
+        "klines_endpoint": "/fapi/v1/klines"
+    },
+    {
+        "name": "Binance Spot",
+        "base_url": "https://api.binance.com",
+        "pairs_endpoint": "/api/v3/exchangeInfo",
+        "klines_endpoint": "/api/v3/klines"
+    },
+    {
+        "name": "CoinGecko",
+        "base_url": "https://api.coingecko.com/api/v3",
+        "pairs_endpoint": "/coins/markets",
+        "klines_endpoint": None  # CoinGecko has different structure
+    }
+]
+
+CURRENT_API = API_CONFIGS[0]  # Default to Binance Futures
+
 # Database
 @contextmanager
 def get_db():
@@ -52,10 +73,9 @@ def get_db():
     finally:
         conn.close()
 
-# Initialize Enhanced Database
+# Initialize Database
 def init_db():
     with get_db() as conn:
-        # Users table with email verification
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,6 +190,27 @@ class UserUpdate(BaseModel):
     status: Optional[str] = None
     subscription_days: Optional[int] = None
 
+class AnalysisRequest(BaseModel):
+    pair: str
+    timeframe: str
+
+class UserCreate(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+    role: str = "member"
+    subscription_days: Optional[int] = 30
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class UserUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    role: Optional[str] = None
+    status: Optional[str] = None
+    subscription_days: Optional[int] = None
+
 class EmailVerification(BaseModel):
     token: str
 
@@ -199,30 +240,6 @@ class SignalFeedback(BaseModel):
 
 class TermsAcceptance(BaseModel):
     terms_version: str
-
-# Email Functions
-def send_email(to_email: str, subject: str, body: str):
-    """Send email (configure with your SMTP)"""
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = f"{EMAIL_CONFIG['sender_name']} <{EMAIL_CONFIG['sender_email']}>"
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        
-        msg.attach(MIMEText(body, 'html'))
-        
-        # In production, use actual SMTP
-        # server = smtplib.SMTP(EMAIL_CONFIG['smtp_server'], EMAIL_CONFIG['smtp_port'])
-        # server.starttls()
-        # server.login(EMAIL_CONFIG['sender_email'], EMAIL_CONFIG['sender_password'])
-        # server.send_message(msg)
-        # server.quit()
-        
-        print(f"Email would be sent to {to_email}: {subject}")
-        return True
-    except Exception as e:
-        print(f"Email error: {e}")
-        return False
 
 # Helper Functions
 def create_token(user_id: int, username: str, role: str) -> str:
@@ -259,21 +276,70 @@ def check_subscription(user: dict = Depends(get_current_user)):
             raise HTTPException(status_code=403, detail="Subscription expired")
     return user
 
-# API Helper Functions
+
+
+# API Helper Functions with Retry and Fallback
 def make_request_with_retry(url, params=None, max_retries=3):
+    """Make HTTP request with retry logic and SSL handling"""
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     for attempt in range(max_retries):
         try:
+            # Disable SSL verification to avoid certificate errors
             response = requests.get(url, params=params, timeout=10, verify=False)
             response.raise_for_status()
             return response.json()
-        except:
+        except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
                 time.sleep(1)
                 continue
-            raise HTTPException(status_code=503, detail="API unavailable")
+            raise HTTPException(status_code=504, detail="API timeout")
+        except requests.exceptions.SSLError:
+            # Try without SSL verification
+            try:
+                response = requests.get(url, params=params, timeout=10, verify=False)
+                response.raise_for_status()
+                return response.json()
+            except Exception as ssl_e:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                raise HTTPException(status_code=503, detail=f"SSL Error: {str(ssl_e)}")
+        except requests.exceptions.ConnectionError:
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            raise HTTPException(status_code=503, detail="Cannot connect to market data API. Using mock data.")
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            raise HTTPException(status_code=500, detail=f"API error: {str(e)}")
+
+# Email Functions
+def send_email(to_email: str, subject: str, body: str):
+    """Send email (configure with your SMTP)"""
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = f"{EMAIL_CONFIG['sender_name']} <{EMAIL_CONFIG['sender_email']}>"
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        
+        msg.attach(MIMEText(body, 'html'))
+        
+        # In production, use actual SMTP
+        # server = smtplib.SMTP(EMAIL_CONFIG['smtp_server'], EMAIL_CONFIG['smtp_port'])
+        # server.starttls()
+        # server.login(EMAIL_CONFIG['sender_email'], EMAIL_CONFIG['sender_password'])
+        # server.send_message(msg)
+        # server.quit()
+        
+        print(f"Email would be sent to {to_email}: {subject}")
+        return True
+    except Exception as e:
+        print(f"Email error: {e}")
+        return False
 
 def fetch_ohlcv(pair: str, timeframe: str, limit: int = 500):
     interval_map = {
@@ -413,8 +479,8 @@ def detect_market_condition(df):
         "price_range": float(price_range)
     }
 
-def analyze_trading_signal(df, market_condition=None):
-    """Enhanced trading signal analysis"""
+def analyze_trading_signal(df):
+    """Comprehensive trading signal analysis"""
     close = df["close"]
     high = df["high"]
     low = df["low"]
@@ -706,8 +772,184 @@ def backtest_strategy(pair: str, timeframe: str, start_date: str, end_date: str,
     }
 
 # API Routes
+@app.post("/api/auth/register")
+async def register(user: UserCreate):
+    password_hash = bcrypt.hashpw(user.password.encode(), bcrypt.gensalt()).decode()
+    subscription_date = None
+    if user.subscription_days:
+        subscription_date = (datetime.now() + timedelta(days=user.subscription_days)).isoformat()
+    
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO users (username, email, password_hash, role, subscription_expired_at) VALUES (?, ?, ?, ?, ?)",
+                (user.username, user.email, password_hash, user.role, subscription_date)
+            )
+        return {"message": "User created successfully"}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Username or email already exists")
 
-# Auth Routes
+@app.post("/api/auth/login")
+async def login(credentials: UserLogin):
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE username = ?", (credentials.username,)).fetchone()
+    
+    if not user or not bcrypt.checkpw(credentials.password.encode(), user["password_hash"].encode()):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    token = create_token(user["id"], user["username"], user["role"])
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "email": user["email"],
+            "role": user["role"],
+            "status": user["status"]
+        }
+    }
+
+@app.get("/api/users/me")
+async def get_me(user: dict = Depends(get_current_user)):
+    return user
+
+@app.get("/api/users")
+async def list_users(user: dict = Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    with get_db() as conn:
+        users = conn.execute("SELECT id, username, email, role, status, subscription_expired_at, created_at FROM users").fetchall()
+    return [dict(u) for u in users]
+
+@app.put("/api/users/{user_id}")
+async def update_user(user_id: int, update: UserUpdate, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    updates = []
+    params = []
+    if update.email:
+        updates.append("email = ?")
+        params.append(update.email)
+    if update.role:
+        updates.append("role = ?")
+        params.append(update.role)
+    if update.status:
+        updates.append("status = ?")
+        params.append(update.status)
+    if update.subscription_days:
+        new_date = (datetime.now() + timedelta(days=update.subscription_days)).isoformat()
+        updates.append("subscription_expired_at = ?")
+        params.append(new_date)
+    
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    
+    params.append(user_id)
+    with get_db() as conn:
+        conn.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", params)
+    
+    return {"message": "User updated successfully"}
+
+@app.delete("/api/users/{user_id}")
+async def delete_user(user_id: int, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    with get_db() as conn:
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    return {"message": "User deleted successfully"}
+
+@app.get("/api/trading/pairs")
+async def get_trading_pairs():
+    """Get available trading pairs - with fallback"""
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    try:
+        # Try Binance Futures first
+        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        data = make_request_with_retry(url)
+        pairs = [s["symbol"] for s in data["symbols"] if s["status"] == "TRADING" and "USDT" in s["symbol"]][:50]
+        formatted_pairs = [p[:-4] + "/" + p[-4:] for p in pairs]
+        return {"pairs": formatted_pairs}
+    except:
+        try:
+            # Fallback to Binance Spot
+            url = "https://api.binance.com/api/v3/exchangeInfo"
+            data = make_request_with_retry(url)
+            pairs = [s["symbol"] for s in data["symbols"] if s["status"] == "TRADING" and "USDT" in s["symbol"]][:50]
+            formatted_pairs = [p[:-4] + "/" + p[-4:] for p in pairs]
+            return {"pairs": formatted_pairs}
+        except:
+            # Fallback to hardcoded popular pairs
+            return {"pairs": [
+                "BTC/USDT", "ETH/USDT", "BNB/USDT", "XRP/USDT", "ADA/USDT",
+                "DOGE/USDT", "SOL/USDT", "DOT/USDT", "MATIC/USDT", "LTC/USDT",
+                "LINK/USDT", "UNI/USDT", "ATOM/USDT", "ETC/USDT", "XLM/USDT",
+                "AVAX/USDT", "TRX/USDT", "SHIB/USDT", "BCH/USDT", "ALGO/USDT"
+            ]}
+
+@app.post("/api/trading/analyze")
+async def analyze_trading(request: AnalysisRequest, user: dict = Depends(check_subscription)):
+    try:
+        df = fetch_ohlcv(request.pair, request.timeframe)
+        analysis = analyze_trading_signal(df)
+        
+        # Save to history
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO analysis_history (user_id, pair, timeframe, signal, score, indicators_data) VALUES (?, ?, ?, ?, ?, ?)",
+                (user["id"], request.pair, request.timeframe, analysis["signal"], analysis["confidence_score"], str(analysis))
+            )
+        
+        return analysis
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+@app.get("/api/analytics/dashboard")
+async def get_dashboard(user: dict = Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    with get_db() as conn:
+        total_users = conn.execute("SELECT COUNT(*) as count FROM users").fetchone()["count"]
+        active_users = conn.execute("SELECT COUNT(*) as count FROM users WHERE status = 'active'").fetchone()["count"]
+        total_analyses = conn.execute("SELECT COUNT(*) as count FROM analysis_history").fetchone()["count"]
+        recent_analyses = conn.execute(
+            "SELECT * FROM analysis_history ORDER BY created_at DESC LIMIT 10"
+        ).fetchall()
+    
+    return {
+        "total_users": total_users,
+        "active_users": active_users,
+        "total_analyses": total_analyses,
+        "recent_analyses": [dict(a) for a in recent_analyses]
+    }
+
+@app.get("/api/analytics/history")
+async def get_analysis_history(user: dict = Depends(get_current_user)):
+    with get_db() as conn:
+        if user["role"] == "admin":
+            history = conn.execute("SELECT * FROM analysis_history ORDER BY created_at DESC LIMIT 100").fetchall()
+        else:
+            history = conn.execute(
+                "SELECT * FROM analysis_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 50",
+                (user["id"],)
+            ).fetchall()
+    return [dict(h) for h in history]
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Crypto Trading DSS API",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "status": "online"
+    }
+
 @app.post("/api/auth/register")
 async def register(user: UserCreate, background_tasks: BackgroundTasks):
     password_hash = bcrypt.hashpw(user.password.encode(), bcrypt.gensalt()).decode()
@@ -827,3 +1069,7 @@ async def reset_password(reset: PasswordReset):
         )
     
     return {"message": "Password reset successfully"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=2401)

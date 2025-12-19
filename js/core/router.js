@@ -116,7 +116,7 @@ class Router {
                 'dashboard': 'dashboardApp',
                 'members': 'membersApp',
                 'analytics': 'analyticsApp',
-                'trader-insight': 'trader-insightApp',
+                'trader-insight': 'traderInsightApp',
                 'backtest': 'backtestApp',
                 'win-rate': 'winRateApp'
             };
