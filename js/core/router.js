@@ -1,4 +1,4 @@
-// Router Service - Client-side routing for micro-apps
+// Router Service - Client-side routing for micro-apps with new features
 class Router {
     constructor() {
         this.routes = {};
@@ -17,7 +17,10 @@ class Router {
         });
 
         // Listen to auth events
-        window.addEventListener('auth:login', () => {
+        window.addEventListener('auth:login', async () => {
+            // Check terms acceptance
+            await window.TermsComponent.checkAndShowTerms();
+
             const user = window.Auth.getUser();
             const defaultRoute = user.role === 'admin' ? 'dashboard' : 'trader-insight';
             this.navigateTo(defaultRoute);
@@ -26,6 +29,20 @@ class Router {
         window.addEventListener('auth:logout', () => {
             this.navigateTo('login');
         });
+
+        // Handle email verification and password reset from URL
+        const path = window.location.pathname;
+        const search = window.location.search;
+
+        if (search.includes('token=')) {
+            if (path.includes('verify') || search.includes('verify')) {
+                this.navigateTo('verify-email', false);
+                return;
+            } else if (path.includes('reset') || search.includes('reset')) {
+                this.navigateTo('reset-password', false);
+                return;
+            }
+        }
     }
 
     register(name, config) {
@@ -90,20 +107,44 @@ class Router {
                 microApp.loaded = true;
             }
 
+            // Map route names to app objects
+            const appMap = {
+                'login': 'loginApp',
+                'verify-email': 'verifyEmailApp',
+                'forgot-password': 'forgotPasswordApp',
+                'reset-password': 'resetPasswordApp',
+                'dashboard': 'dashboardApp',
+                'members': 'membersApp',
+                'analytics': 'analyticsApp',
+                'trader-insight': 'trader-insightApp',
+                'backtest': 'backtestApp',
+                'win-rate': 'winRateApp'
+            };
+
+            const appName = appMap[name];
+
             // Render micro-app
-            if (window[`${name}App`] && typeof window[`${name}App`].render === 'function') {
-                await window[`${name}App`].render(this.container);
+            if (window[appName] && typeof window[appName].render === 'function') {
+                await window[appName].render(this.container);
             } else {
+                console.error(`App ${appName} not found or no render method`);
                 this.container.innerHTML = '<div class="error">Failed to load micro-app</div>';
             }
         } catch (error) {
             console.error('Failed to load micro-app:', error);
-            this.container.innerHTML = '<div class="error">Error loading micro-app</div>';
+            this.container.innerHTML = `<div class="error">Error loading micro-app: ${error.message}</div>`;
         }
     }
 
     loadScript(src) {
         return new Promise((resolve, reject) => {
+            // Check if script already exists
+            const existingScript = document.querySelector(`script[src="${src}"]`);
+            if (existingScript) {
+                resolve();
+                return;
+            }
+
             const script = document.createElement('script');
             script.src = src;
             script.onload = resolve;

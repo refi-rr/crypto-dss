@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Crypto Trading DSS</title>
+    <title>Crypto Trading DSS v2.0</title>
     <link rel="stylesheet" href="css/styles.css">
 </head>
 
@@ -33,6 +33,7 @@
     <script src="js/components/sidebar.js"></script>
     <script src="js/components/header.js"></script>
     <script src="js/components/chart.js"></script>
+    <script src="js/components/terms-disclaimer.js"></script>
 
     <!-- Main App - MUST LOAD LAST -->
     <script src="js/core/app.js"></script>
@@ -41,11 +42,21 @@
     <script>
         // Micro-app registry
         window.MicroApps = {
+            // Auth pages
             login: { path: 'js/micro-apps/login/login.js', loaded: false },
+            'verify-email': { path: 'js/micro-apps/verify-email/verify-email.js', loaded: false },
+            'forgot-password': { path: 'js/micro-apps/password/forgot-password.js', loaded: false },
+            'reset-password': { path: 'js/micro-apps/password/reset-password.js', loaded: false },
+
+            // Main features
             dashboard: { path: 'js/micro-apps/dashboard/dashboard.js', loaded: false },
             members: { path: 'js/micro-apps/members/members.js', loaded: false },
             analytics: { path: 'js/micro-apps/analytics/analytics.js', loaded: false },
-            'trader-insight': { path: 'js/micro-apps/trader-insight/trader-insight.js', loaded: false }
+            'trader-insight': { path: 'js/micro-apps/trader-insight/trader-insight.js', loaded: false },
+
+            // New features
+            backtest: { path: 'js/micro-apps/backtest/backtest.js', loaded: false },
+            'win-rate': { path: 'js/micro-apps/win-rate/win-rate.js', loaded: false }
         };
     </script>
 </body>
